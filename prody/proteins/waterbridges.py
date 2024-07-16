@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""This module provides the the WatFinder toolkit that detects, predicts and analyzes water bridges.
+"""This module detects, predicts and analyzes water bridges.
 """
 
 __author__ = 'Karolina Mikulska-Ruminska'
@@ -8,29 +8,26 @@ __credits__ = ['Frane Doljanin', 'Karolina Mikulska-Ruminska']
 __email__ = ['karolamik@fizyka.umk.pl', 'fdoljanin@pmfst.hr']
 
 import numpy as np
-import os
 
 from itertools import combinations
 from collections import deque
 from enum import Enum, auto
 from copy import copy
 
-from prody import LOGGER, SETTINGS
+from prody import LOGGER
 from prody.atomic import Atom, Atomic, AtomGroup
+from prody.dynamics.plotting import showAtomicMatrix
 from prody.ensemble import Ensemble
 from prody.measure import calcAngle, calcDistance
 from prody.measure.contacts import findNeighbors
-from prody.proteins import writePDB, parsePDB
-
-from prody.utilities import showFigure, showMatrix
+from prody.proteins import writePDB
 
 
 __all__ = ['calcWaterBridges', 'calcWaterBridgesTrajectory', 'getWaterBridgesInfoOutput',
            'calcWaterBridgesStatistics', 'getWaterBridgeStatInfo', 'calcWaterBridgeMatrix', 'showWaterBridgeMatrix',
            'calcBridgingResiduesHistogram', 'calcWaterBridgesDistribution',
            'savePDBWaterBridges', 'savePDBWaterBridgesTrajectory',
-           'saveWaterBridges', 'parseWaterBridges', 'findClusterCenters',
-           'filterStructuresWithoutWater']
+           'saveWaterBridges', 'parseWaterBridges']
 
 
 class ResType(Enum):
@@ -387,19 +384,12 @@ def calcWaterBridges(atoms, **kwargs):
     if outputType not in ['info', 'atomic', 'indices']:
         raise TypeError('Output can be info, atomic or indices.')
 
-    water = atoms.select('water')
-    if water is None:
-        raise ValueError('atoms has no water so cannot be analysed with WatFinder')
-
     relations = RelationList(len(atoms))
-    tooFarAtoms = atoms.select(
+    consideredAtoms = ~atoms.select(
         f'water and not within {distWR} of protein')
-    if tooFarAtoms is None:
-        consideredAtoms = atoms
-    else:
-        consideredAtoms = ~tooFarAtoms
 
-    waterHydrogens = consideredAtoms.select('water and hydrogen') or []
+    waterHydrogens = consideredAtoms.select('water and hydrogen') or None
+    print(waterHydrogens)
     waterOxygens = consideredAtoms.select('water and oxygen')
     waterHydroOxyPairs = findNeighbors(
         waterOxygens, DIST_COVALENT_H, waterHydrogens)
@@ -451,7 +441,7 @@ def calcWaterBridges(atoms, **kwargs):
             waterBridgesWithIndices, getChainBridgeTuple)
 
     LOGGER.info(
-        f'{len(waterBridgesWithIndices)} water bridges detected using method {method}.')
+        f'{len(waterBridgesWithIndices)} water bridges detected.')
     if method == 'atomic':
         LOGGER.info('Call getInfoOutput to convert atomic to info output.')
 
@@ -477,8 +467,7 @@ def calcWaterBridgesTrajectory(atoms, trajectory, **kwargs):
     :arg atoms: Atomic object from which atoms are considered
     :type atoms: :class:`.Atomic`
 
-    :arg trajectory: Trajectory data coming from a DCD or multi-model PDB file.
-    :type trajectory: :class:`.Trajectory', :class:`.Ensemble`, :class:`.Atomic`
+    :arg trajectory: trajectory object, DCD or multimodal PDB
 
     :arg start_frame: frame to start from
     :type start_frame: int
@@ -497,7 +486,7 @@ def calcWaterBridgesTrajectory(atoms, trajectory, **kwargs):
 
         # nfi = trajectory._nfi
         # trajectory.reset()
-        # numFrames = trajectory._n_csets
+        numFrames = trajectory._n_csets
 
         if stop_frame == -1:
             traj = trajectory[start_frame:]
@@ -547,12 +536,6 @@ class DictionaryList:
     def keys(self):
         return self.values.keys()
 
-    def removeDuplicateKeys(self, criterion):
-        keysCopy = list(self.values.keys())
-        for key in keysCopy:
-            if criterion(self.values.keys(), key):
-                del self.values[key]
-
 
 def getResInfo(atoms):
     dict = {}
@@ -594,7 +577,7 @@ def calcWaterBridgesStatistics(frames, trajectory, **kwargs):
     :type frames: list
 
     :arg output: return dictorinary whose keys are tuples of resnames or resids
-        default is 'indices'
+        default is 'resid'
     :type output: 'info' | 'indices'
 
     :arg filename: name of file to save statistic information if wanted
@@ -639,9 +622,6 @@ def calcWaterBridgesStatistics(frames, trajectory, **kwargs):
                 resNames[res_1] = res_1_name
                 resNames[res_2] = res_2_name
 
-    interactionCount.removeDuplicateKeys(
-        lambda keys, key: (key[1], key[0]) in keys)
-
     tableHeader = f'{"RES1":<15}{"RES2":<15}{"PERC":<10}{"DIST_AVG":<10}{"DIST_STD":<10}'
     LOGGER.info(tableHeader)
     info = {}
@@ -658,12 +638,10 @@ def calcWaterBridgesStatistics(frames, trajectory, **kwargs):
 
         outputKey = key
         x, y = key
-        if output == 'info':
+        if output == 'resname':
             outputKey = (resNames[x], resNames[y])
-            info[outputKey] = pairInfo
-        elif output == 'indices':
-            key1, key2 = (x, y), (y, x)
-            info[key1], info[key2] = pairInfo, pairInfo
+
+        info[outputKey] = pairInfo
 
         tableRow = f'{resNames[x]:<15}{resNames[y]:<15}{percentage:<10.3f}{distAvg:<10.3f}{distStd:<10.3f}'
         LOGGER.info(tableRow)
@@ -711,7 +689,7 @@ def showWaterBridgeMatrix(data, metric):
         'distStd': 'Distance standard deviation'
     }
 
-    showMatrix(matrix)
+    showAtomicMatrix(matrix)
     plt.title(titles[metric])
 
 
@@ -747,8 +725,7 @@ def calcBridgingResiduesHistogram(frames, **kwargs):
         default is 20
     :type clip: int
     """
-
-    show_plot = kwargs.pop('show_plot', False)
+    import matplotlib.pyplot as plt
 
     clip = kwargs.pop('clip', 20)
     if clip == None:
@@ -767,25 +744,18 @@ def calcBridgingResiduesHistogram(frames, **kwargs):
 
     labels, values = zip(*sortedResidues[-clip:])
 
-    if show_plot:
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(5, 3 + 0.11 * len(labels)))
-        plt.barh(labels, values)
-        plt.xlabel('Number of frame appearances')
-        plt.ylabel('Residue')
-        plt.title('Water bridging residues')
-        plt.tight_layout()
-        plt.margins(y=0.01)
-        plt.gca().xaxis.set_label_position('top')
-        plt.gca().xaxis.tick_top()
-        if SETTINGS['auto_show']:
-            showFigure()
+    plt.figure(figsize=(5, 3 + 0.11 * len(labels)))
+    plt.barh(labels, values)
+    plt.xlabel('Number of frame appearances')
+    plt.ylabel('Residue')
+    plt.title('Water bridging residues')
+    plt.tight_layout()
+    plt.margins(y=0.01)
+    plt.gca().xaxis.set_label_position('top')
+    plt.gca().xaxis.tick_top()
+    plt.show()
 
     return sortedResidues
-
-def showBridgingResiduesHistogram(frames, **kwargs):
-    kwargs['show_plot'] = True
-    return calcBridgingResiduesHistogram(frames, **kwargs)
 
 
 def getBridgingResidues(frames, residue):
@@ -893,7 +863,8 @@ def calcWaterBridgesDistribution(frames, res_a, res_b=None, **kwargs):
         default is 'dict'
     :type output: 'dict' | 'indices'
     """
-    show_plot = kwargs.pop('show_plot', False)
+    import matplotlib.pyplot as plt
+    
     metric = kwargs.pop('metric', 'residues')
     trajectory = kwargs.pop('trajectory', None)
 
@@ -910,20 +881,14 @@ def calcWaterBridgesDistribution(frames, res_a, res_b=None, **kwargs):
 
     result = methods[metric]()
 
-    if metric in ['waters', 'distance'] and show_plot:
-        import matplotlib.pyplot as plt
+    if metric in ['waters', 'distance']:
         plt.hist(result, rwidth=0.95, density=True)
         plt.xlabel('Value')
         plt.ylabel('Probability')
         plt.title(f'Distribution: {metric}')
-        if SETTINGS['auto_show']:
-            showFigure()
+        plt.show()
 
-    return result
-
-def showWaterBridgesDistribution(frames, res_a, res_b=None, **kwargs):
-    kwargs['show_plot'] = True
-    return calcWaterBridgesDistribution(frames, res_a, res_b, **kwargs)
+    return methods[metric]()
 
 
 def savePDBWaterBridges(bridges, atoms, filename):
@@ -1082,136 +1047,3 @@ def parseWaterBridges(filename, atoms):
         bridgesFrames = bridgesFrames[0]
 
     return bridgesFrames
-
-
-def findClusterCenters(file_pattern, **kwargs):
-    """ Find molecules that are forming cluster in 3D space.
-    
-    :arg file_pattern: file pattern for anlaysis
-        it can include '*'
-        example:'file_*.pdb' will analyze file_1.pdb, file_2.pdb, etc.
-    :type file_pattern: str
-    
-    :arg selection: selection string
-        by default water and name OH2 is used
-    :type selection: str
-    
-    :arg distC: distance to other molecules
-    :type distC: int, float
-        default is 0.3
-        
-    :arg numC: min number of molecules in a cluster
-        default is 3
-    :type numC: int
-    """
-    
-    import glob
-    import numpy as np
-
-    selection = kwargs.pop('selection', 'water and name OH2')
-    distC = kwargs.pop('distC', 0.3)
-    numC = kwargs.pop('numC', 3)
-    
-    matching_files = glob.glob(file_pattern)
-    matching_files.sort()
-    coords_all = parsePDB(matching_files[0]).select(selection).toAtomGroup()
-
-    for i in matching_files[1:]:
-        coords = parsePDB(i).select('water').toAtomGroup()
-        coords_all += coords
-
-    removeResid = []
-    removeCoords = []
-    for ii in range(len(coords_all)):
-        sel = coords_all.select('water within '+str(distC)+' of center', 
-                                center=coords_all.getCoords()[ii])
-        if sel is not None and len(sel) <= int(numC):
-            removeResid.append(coords_all.getResnums()[ii])
-            removeCoords.append(list(coords_all.getCoords()[ii]))
-
-    selectedWaters = AtomGroup()
-    sel_waters = [] 
-
-    for j in coords_all.getCoordsets()[0].tolist():
-        if j not in removeCoords:
-            sel_waters.append(j)
-
-    coords_wat = np.array([sel_waters], dtype=float)
-    if coords_wat.shape[0] == 0:
-        raise ValueError('No waters were selected. You may need to align your trajectory')
-    
-    selectedWaters.setCoords(coords_wat)
-    selectedWaters.setNames(['DUM']*len(selectedWaters))
-    selectedWaters.setResnums(range(1, len(selectedWaters)+1))
-    selectedWaters.setResnames(['DUM']*len(selectedWaters))
-
-    try:
-        filename = 'clusters_'+file_pattern.split("*")[0]+'.pdb'
-    except:
-        filename = 'clusters.pdb'
-    writePDB(filename, selectedWaters)
-    LOGGER.info("Results are saved in {0}.".format(filename))
-
-def filterStructuresWithoutWater(structures, min_water=0, filenames=None):
-    """This function will filter out structures from *structures* that have no water 
-    or fewer water molecules than *min_water*.
-    
-    :arg structures: list of :class:`.Atomic` structures to be filtered
-    :type structures: list
-
-    :arg min_water: minimum number of water O atoms, 
-        default is 0
-    :type min_water: int
-
-    :arg filenames: an optional list of filenames to filter too
-        This is an output argument
-    :type filenames: list
-    """
-
-    if not isinstance(structures, list):
-        raise TypeError('structures should be a list')
-    
-    if not np.alltrue([isinstance(struct, Atomic) for struct in structures]):
-        raise ValueError('elements of structures should be Atomic objects')
-    
-    if not isinstance(min_water, int):
-        raise TypeError('min_water should be an integer')
-    
-    if filenames is None: filenames = []
-
-    if not isinstance(filenames, list):
-        raise TypeError('filenames should be None or a list')
-    
-    if len(filenames) not in [0, len(structures)]:
-        raise TypeError('filenames should have the same length as structures')
-    
-    if not np.alltrue([isinstance(filename, str) for filename in filenames]):
-        raise ValueError('elements of filenames should be strings')
-    
-    if not np.alltrue([os.path.exists(filename) for filename in filenames]):
-        raise ValueError('at least one of the filenames does not exist')
-    
-    have_filenames = len(filenames)>0
-
-    new_structures = []
-    numStructures = len(structures)
-    for i, struct in enumerate(reversed(structures)):
-        title = struct.getTitle()
-        waters = struct.select('water and name O')
-    
-        if waters == None:
-            LOGGER.warn(title+" doesn't contain water molecules")
-            if have_filenames:
-                filenames.pop(numStructures-i-1)
-            continue
-    
-        numWaters = waters.numAtoms()
-        if numWaters < min_water:
-            LOGGER.warn(title+" doesn't contain enough water molecules ({0})".format(numWaters))
-            if have_filenames:
-                filenames.pop(numStructures-i-1)
-            continue
-
-        new_structures.append(struct)
-
-    return list(reversed(new_structures))
